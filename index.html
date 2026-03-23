@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Light Shadow Runner - Invert Mode</title>
+<title>Light Shadow Runner - Safe Generator</title>
 <style>
 body {
   margin: 0;
@@ -87,7 +87,7 @@ canvas {
 
   <div class="hint">
     Controls: <b>Space / left click / touch</b> to switch between Light and Shadow. Press <b>P</b> to pause.<br>
-    Rule: when you switch, the whole world inverts. In Light mode the background is white and obstacles are black. In Shadow mode the background is black and obstacles are white. Obstacles from the other side no longer affect the player.
+    Fixed generator: it will not place an opposite-realm obstacle too close behind the previous one. Realm switches always reserve enough reaction distance to stay solvable.
   </div>
 </div>
 
@@ -105,8 +105,10 @@ const pauseBtn = document.getElementById('pauseBtn');
 const W = canvas.width;
 const H = canvas.height;
 const CENTER_Y = H / 2;
+const PLAYER_X = 120;
+const PLAYER_R = 14;
 
-let best = Number(localStorage.getItem('light_shadow_invert_best') || 0);
+let best = Number(localStorage.getItem('light_shadow_safe_generator_best') || 0);
 bestEl.textContent = best;
 
 const state = {
@@ -118,7 +120,9 @@ const state = {
   flash: 0,
   mode: 'light',
   obstacles: [],
-  particles: []
+  particles: [],
+  lastSpawnMode: 'light',
+  lastSpawnEndX: W + 60
 };
 
 function rand(a, b) {
@@ -130,8 +134,8 @@ function pick(arr) {
 }
 
 function difficultyLevel() {
-  if (state.score < 200) return 0;
-  if (state.score < 600) return 1;
+  if (state.score < 220) return 0;
+  if (state.score < 650) return 1;
   if (state.score < 1200) return 2;
   return 3;
 }
@@ -145,6 +149,8 @@ function resetGame() {
   state.mode = 'light';
   state.obstacles = [];
   state.particles = [];
+  state.lastSpawnMode = 'light';
+  state.lastSpawnEndX = W + 60;
   scoreEl.textContent = '0';
   modeTextEl.textContent = 'LIGHT';
   speedTextEl.textContent = '1.00x';
@@ -160,7 +166,7 @@ function switchMode() {
 
   for (let i = 0; i < 16; i++) {
     state.particles.push({
-      x: 120,
+      x: PLAYER_X,
       y: CENTER_Y,
       vx: (Math.random() - 0.5) * 7,
       vy: (Math.random() - 0.5) * 7,
@@ -197,29 +203,61 @@ function createObstacle(x, mode, type) {
     ob.height = rand(120, 180);
     ob.offsetY = rand(20, 50);
   }
+
   return ob;
 }
 
-// Dense but solvable for a single-lane switch world:
-// only one obstacle matters at a time because other-mode obstacles do not collide.
+function minimumGapFor(nextMode, level) {
+  const switching = nextMode !== state.lastSpawnMode;
+
+  // Important fix:
+  // opposite-realm obstacles need much more room than same-realm obstacles,
+  // otherwise one can appear "right in front of" the previous realm's obstacle
+  // and force an impossible late switch.
+  const switchFrames = switching ? [20, 18, 17, 16][level] : [8, 7, 6, 6][level];
+  const extraPadding = switching ? [36, 30, 26, 22][level] : [10, 8, 7, 6][level];
+  return state.speed * switchFrames + extraPadding;
+}
+
 function generateNextObstacle() {
   const level = difficultyLevel();
   const types = ['block', 'beam', 'gate'];
   if (level >= 1) types.push('wave');
 
-  const mode = Math.random() < [0.42, 0.48, 0.54, 0.58][level]
-    ? (state.mode === 'light' ? 'shadow' : 'light')
-    : state.mode;
-
-  const type = pick(types);
   const last = state.obstacles.length ? state.obstacles[state.obstacles.length - 1] : null;
+  const lastEndX = last ? last.x + last.width : state.lastSpawnEndX;
 
-  const needsSwitch = mode !== state.mode;
-  const switchFrames = needsSwitch ? 16 : 8;
-  const gap = state.speed * switchFrames + [16, 12, 10, 8][level];
-  const x = last ? last.x + last.width + gap : W + 100;
+  // try several candidates and reject ones that would create too-tight opposite-side spawns
+  for (let tries = 0; tries < 24; tries++) {
+    const switchChance = [0.38, 0.44, 0.50, 0.56][level];
+    const mode = Math.random() < switchChance
+      ? (state.lastSpawnMode === 'light' ? 'shadow' : 'light')
+      : state.lastSpawnMode;
 
-  return createObstacle(x, mode, type);
+    const type = pick(types);
+    const prototype = createObstacle(0, mode, type);
+    const gap = minimumGapFor(mode, level) + rand(0, [14, 10, 8, 6][level]);
+    const x = lastEndX + gap;
+    prototype.x = x;
+
+    // hard safety rule:
+    // opposite realm obstacle must not begin before the player had time
+    // to clear the previous obstacle and switch.
+    const safeFrontBuffer = mode !== state.lastSpawnMode ? state.speed * 6 + 10 : 0;
+    if (mode !== state.lastSpawnMode && x < lastEndX + minimumGapFor(mode, level) - safeFrontBuffer) {
+      continue;
+    }
+
+    state.lastSpawnMode = mode;
+    state.lastSpawnEndX = prototype.x + prototype.width;
+    return prototype;
+  }
+
+  // fallback: same-side safe spawn with generous gap
+  const fallbackMode = state.lastSpawnMode;
+  const fallback = createObstacle(lastEndX + state.speed * 10 + 24, fallbackMode, 'block');
+  state.lastSpawnEndX = fallback.x + fallback.width;
+  return fallback;
 }
 
 function spawnObstacle() {
@@ -253,7 +291,7 @@ function hit() {
 
   for (let i = 0; i < 24; i++) {
     state.particles.push({
-      x: 120,
+      x: PLAYER_X,
       y: CENTER_Y,
       vx: (Math.random() - 0.5) * 10,
       vy: (Math.random() - 0.5) * 10,
@@ -265,21 +303,21 @@ function hit() {
 
   if (state.score > best) {
     best = Math.floor(state.score);
-    localStorage.setItem('light_shadow_invert_best', String(best));
+    localStorage.setItem('light_shadow_safe_generator_best', String(best));
     bestEl.textContent = best;
   }
 }
 
 function updateObstacles() {
   const level = difficultyLevel();
-  state.speed += [0.0010, 0.0015, 0.0020, 0.0026][level];
+  state.speed += [0.0010, 0.0014, 0.0018, 0.0022][level];
   speedTextEl.textContent = (state.speed / state.baseSpeed).toFixed(2) + 'x';
 
   for (const ob of state.obstacles) {
     ob.x -= state.speed;
     ob.wobble += 0.05 + level * 0.01;
 
-    if (!ob.passed && ob.x + ob.width < 120) {
+    if (!ob.passed && ob.x + ob.width < PLAYER_X) {
       ob.passed = true;
       state.score += 10;
       scoreEl.textContent = Math.floor(state.score);
@@ -287,6 +325,17 @@ function updateObstacles() {
   }
 
   state.obstacles = state.obstacles.filter(ob => ob.x + ob.width > -120);
+
+  // keep generator state consistent with remaining farthest obstacle
+  if (state.obstacles.length) {
+    const farthest = state.obstacles[state.obstacles.length - 1];
+    state.lastSpawnMode = farthest.mode;
+    state.lastSpawnEndX = farthest.x + farthest.width;
+  } else {
+    state.lastSpawnMode = state.mode;
+    state.lastSpawnEndX = W + 60;
+  }
+
   ensureObstacles();
 }
 
@@ -304,12 +353,10 @@ function updateParticles() {
 function checkCollision() {
   if (state.gameOver) return;
   for (const ob of state.obstacles) {
-    // KEY FIX:
-    // obstacles only affect the player when they belong to the CURRENT mode.
+    // only current-mode obstacles can collide
     if (ob.mode !== state.mode) continue;
-
     const r = obstacleRect(ob);
-    if (rectCircleCollide(r.x, r.y, r.w, r.h, 120, CENTER_Y, 14)) {
+    if (rectCircleCollide(r.x, r.y, r.w, r.h, PLAYER_X, CENTER_Y, PLAYER_R)) {
       return hit();
     }
   }
@@ -327,14 +374,9 @@ function update() {
 }
 
 function drawBackground() {
-  if (state.mode === 'light') {
-    ctx.fillStyle = '#ffffff';
-  } else {
-    ctx.fillStyle = '#000000';
-  }
+  ctx.fillStyle = state.mode === 'light' ? '#ffffff' : '#000000';
   ctx.fillRect(0, 0, W, H);
 
-  // unified background grid
   ctx.strokeStyle = state.mode === 'light'
     ? 'rgba(0,0,0,0.06)'
     : 'rgba(255,255,255,0.08)';
@@ -362,7 +404,6 @@ function drawBackground() {
 }
 
 function drawObstacle(ob) {
-  // only draw current-mode obstacles
   if (ob.mode !== state.mode) return;
 
   const r = obstacleRect(ob);
@@ -398,7 +439,7 @@ function drawPlayer() {
   const stroke = state.mode === 'light' ? '#ffffff' : '#000000';
 
   ctx.beginPath();
-  ctx.arc(120, CENTER_Y, 14, 0, Math.PI * 2);
+  ctx.arc(PLAYER_X, CENTER_Y, PLAYER_R, 0, Math.PI * 2);
   ctx.fillStyle = fill;
   ctx.fill();
   ctx.lineWidth = 3;
