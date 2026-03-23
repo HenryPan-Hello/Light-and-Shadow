@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Light Shadow Runner - Invert Mode</title>
+<style>
+body {
+  margin: 0;
+  background: #111;
+  color: #fff;
+  font-family: Arial, Helvetica, sans-serif;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+}
+.wrap {
+  width: min(100vw, 980px);
+  padding: 16px;
+}
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.panel {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.tag {
+  background: #1d1d1d;
+  border: 1px solid #333;
+  border-radius: 999px;
+  padding: 8px 12px;
+  font-size: 14px;
+}
+button {
+  background: #fff;
+  color: #000;
+  border: none;
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+button.secondary {
+  background: #232323;
+  color: #fff;
+  border: 1px solid #444;
+}
+canvas {
+  width: 100%;
+  height: auto;
+  display: block;
+  border: 1px solid #333;
+  border-radius: 14px;
+  box-shadow: 0 10px 40px rgba(0,0,0,.35);
+}
+.hint {
+  margin-top: 10px;
+  font-size: 13px;
+  color: #bbb;
+  line-height: 1.6;
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="panel">
+      <div class="tag">Score: <span id="score">0</span></div>
+      <div class="tag">Best: <span id="best">0</span></div>
+      <div class="tag">Mode: <span id="modeText">LIGHT</span></div>
+      <div class="tag">Speed: <span id="speedText">1.00x</span></div>
+    </div>
+    <div class="panel">
+      <button id="restartBtn">Restart</button>
+      <button id="pauseBtn" class="secondary">Pause</button>
+    </div>
+  </div>
+
+  <canvas id="game" width="900" height="500"></canvas>
+
+  <div class="hint">
+    Controls: <b>Space / left click / touch</b> to switch between Light and Shadow. Press <b>P</b> to pause.<br>
+    Rule: when you switch, the whole world inverts. In Light mode the background is white and obstacles are black. In Shadow mode the background is black and obstacles are white. Obstacles from the other side no longer affect the player.
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+const scoreEl = document.getElementById('score');
+const bestEl = document.getElementById('best');
+const modeTextEl = document.getElementById('modeText');
+const speedTextEl = document.getElementById('speedText');
+const restartBtn = document.getElementById('restartBtn');
+const pauseBtn = document.getElementById('pauseBtn');
+
+const W = canvas.width;
+const H = canvas.height;
+const CENTER_Y = H / 2;
+
+let best = Number(localStorage.getItem('light_shadow_invert_best') || 0);
+bestEl.textContent = best;
+
+const state = {
+  gameOver: false,
+  paused: false,
+  score: 0,
+  speed: 6.0,
+  baseSpeed: 6.0,
+  flash: 0,
+  mode: 'light',
+  obstacles: [],
+  particles: []
+};
+
+function rand(a, b) {
+  return a + Math.random() * (b - a);
+}
+
+function pick(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function difficultyLevel() {
+  if (state.score < 200) return 0;
+  if (state.score < 600) return 1;
+  if (state.score < 1200) return 2;
+  return 3;
+}
+
+function resetGame() {
+  state.gameOver = false;
+  state.paused = false;
+  state.score = 0;
+  state.speed = state.baseSpeed;
+  state.flash = 0;
+  state.mode = 'light';
+  state.obstacles = [];
+  state.particles = [];
+  scoreEl.textContent = '0';
+  modeTextEl.textContent = 'LIGHT';
+  speedTextEl.textContent = '1.00x';
+  pauseBtn.textContent = 'Pause';
+  ensureObstacles();
+}
+
+function switchMode() {
+  if (state.gameOver || state.paused) return;
+  state.mode = state.mode === 'light' ? 'shadow' : 'light';
+  state.flash = 10;
+  modeTextEl.textContent = state.mode.toUpperCase();
+
+  for (let i = 0; i < 16; i++) {
+    state.particles.push({
+      x: 120,
+      y: CENTER_Y,
+      vx: (Math.random() - 0.5) * 7,
+      vy: (Math.random() - 0.5) * 7,
+      life: 18 + Math.random() * 18,
+      size: 2 + Math.random() * 4,
+      mode: state.mode
+    });
+  }
+}
+
+function createObstacle(x, mode, type) {
+  const ob = {
+    x,
+    mode,
+    type,
+    passed: false,
+    width: 52,
+    height: 140,
+    wobble: Math.random() * Math.PI * 2,
+    offsetY: 0
+  };
+
+  if (type === 'block') {
+    ob.width = rand(44, 74);
+    ob.height = rand(130, 220);
+  } else if (type === 'beam') {
+    ob.width = rand(18, 28);
+    ob.height = rand(110, 170);
+  } else if (type === 'gate') {
+    ob.width = rand(30, 46);
+    ob.height = rand(90, 140);
+  } else if (type === 'wave') {
+    ob.width = rand(40, 58);
+    ob.height = rand(120, 180);
+    ob.offsetY = rand(20, 50);
+  }
+  return ob;
+}
+
+// Dense but solvable for a single-lane switch world:
+// only one obstacle matters at a time because other-mode obstacles do not collide.
+function generateNextObstacle() {
+  const level = difficultyLevel();
+  const types = ['block', 'beam', 'gate'];
+  if (level >= 1) types.push('wave');
+
+  const mode = Math.random() < [0.42, 0.48, 0.54, 0.58][level]
+    ? (state.mode === 'light' ? 'shadow' : 'light')
+    : state.mode;
+
+  const type = pick(types);
+  const last = state.obstacles.length ? state.obstacles[state.obstacles.length - 1] : null;
+
+  const needsSwitch = mode !== state.mode;
+  const switchFrames = needsSwitch ? 16 : 8;
+  const gap = state.speed * switchFrames + [16, 12, 10, 8][level];
+  const x = last ? last.x + last.width + gap : W + 100;
+
+  return createObstacle(x, mode, type);
+}
+
+function spawnObstacle() {
+  state.obstacles.push(generateNextObstacle());
+}
+
+function ensureObstacles() {
+  while (state.obstacles.length < 12) spawnObstacle();
+}
+
+function obstacleRect(ob) {
+  let y = CENTER_Y - ob.height / 2;
+  if (ob.type === 'wave') {
+    y += Math.sin(ob.wobble) * ob.offsetY;
+  }
+  return { x: ob.x, y, w: ob.width, h: ob.height };
+}
+
+function rectCircleCollide(rx, ry, rw, rh, cx, cy, cr) {
+  const closestX = Math.max(rx, Math.min(cx, rx + rw));
+  const closestY = Math.max(ry, Math.min(cy, ry + rh));
+  const dx = cx - closestX;
+  const dy = cy - closestY;
+  return dx * dx + dy * dy < cr * cr;
+}
+
+function hit() {
+  if (state.gameOver) return;
+  state.gameOver = true;
+  state.flash = 12;
+
+  for (let i = 0; i < 24; i++) {
+    state.particles.push({
+      x: 120,
+      y: CENTER_Y,
+      vx: (Math.random() - 0.5) * 10,
+      vy: (Math.random() - 0.5) * 10,
+      life: 22 + Math.random() * 18,
+      size: 3 + Math.random() * 5,
+      mode: Math.random() > 0.5 ? 'light' : 'shadow'
+    });
+  }
+
+  if (state.score > best) {
+    best = Math.floor(state.score);
+    localStorage.setItem('light_shadow_invert_best', String(best));
+    bestEl.textContent = best;
+  }
+}
+
+function updateObstacles() {
+  const level = difficultyLevel();
+  state.speed += [0.0010, 0.0015, 0.0020, 0.0026][level];
+  speedTextEl.textContent = (state.speed / state.baseSpeed).toFixed(2) + 'x';
+
+  for (const ob of state.obstacles) {
+    ob.x -= state.speed;
+    ob.wobble += 0.05 + level * 0.01;
+
+    if (!ob.passed && ob.x + ob.width < 120) {
+      ob.passed = true;
+      state.score += 10;
+      scoreEl.textContent = Math.floor(state.score);
+    }
+  }
+
+  state.obstacles = state.obstacles.filter(ob => ob.x + ob.width > -120);
+  ensureObstacles();
+}
+
+function updateParticles() {
+  for (const p of state.particles) {
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vx *= 0.98;
+    p.vy *= 0.98;
+    p.life -= 1;
+  }
+  state.particles = state.particles.filter(p => p.life > 0);
+}
+
+function checkCollision() {
+  if (state.gameOver) return;
+  for (const ob of state.obstacles) {
+    // KEY FIX:
+    // obstacles only affect the player when they belong to the CURRENT mode.
+    if (ob.mode !== state.mode) continue;
+
+    const r = obstacleRect(ob);
+    if (rectCircleCollide(r.x, r.y, r.w, r.h, 120, CENTER_Y, 14)) {
+      return hit();
+    }
+  }
+}
+
+function update() {
+  if (state.paused || state.gameOver) return;
+  state.score += 0.12;
+  scoreEl.textContent = Math.floor(state.score);
+  updateObstacles();
+  updateParticles();
+  checkCollision();
+
+  if (state.flash > 0) state.flash--;
+}
+
+function drawBackground() {
+  if (state.mode === 'light') {
+    ctx.fillStyle = '#ffffff';
+  } else {
+    ctx.fillStyle = '#000000';
+  }
+  ctx.fillRect(0, 0, W, H);
+
+  // unified background grid
+  ctx.strokeStyle = state.mode === 'light'
+    ? 'rgba(0,0,0,0.06)'
+    : 'rgba(255,255,255,0.08)';
+
+  for (let x = 0; x < W; x += 40) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, H);
+    ctx.stroke();
+  }
+
+  for (let y = 0; y < H; y += 40) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(W, y);
+    ctx.stroke();
+  }
+
+  if (state.flash > 0) {
+    ctx.fillStyle = state.mode === 'light'
+      ? `rgba(0,0,0,${state.flash / 50})`
+      : `rgba(255,255,255,${state.flash / 50})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+function drawObstacle(ob) {
+  // only draw current-mode obstacles
+  if (ob.mode !== state.mode) return;
+
+  const r = obstacleRect(ob);
+  const color = state.mode === 'light' ? '#000000' : '#ffffff';
+
+  ctx.fillStyle = color;
+  ctx.globalAlpha = 0.98;
+  ctx.fillRect(r.x, r.y, r.w, r.h);
+
+  if (ob.type === 'block' || ob.type === 'wave') {
+    const step = 14;
+    for (let i = 0; i < r.w; i += step) {
+      ctx.beginPath();
+      ctx.moveTo(r.x + i, r.y);
+      ctx.lineTo(r.x + i + step / 2, r.y - 10);
+      ctx.lineTo(r.x + i + step, r.y);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.moveTo(r.x + i, r.y + r.h);
+      ctx.lineTo(r.x + i + step / 2, r.y + r.h + 10);
+      ctx.lineTo(r.x + i + step, r.y + r.h);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawPlayer() {
+  const fill = state.mode === 'light' ? '#000000' : '#ffffff';
+  const stroke = state.mode === 'light' ? '#ffffff' : '#000000';
+
+  ctx.beginPath();
+  ctx.arc(120, CENTER_Y, 14, 0, Math.PI * 2);
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = stroke;
+  ctx.stroke();
+}
+
+function drawParticles() {
+  for (const p of state.particles) {
+    ctx.globalAlpha = Math.max(0, p.life / 40);
+    ctx.fillStyle = p.mode === 'light' ? '#000000' : '#ffffff';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawUIOverlay() {
+  if (!state.gameOver) return;
+
+  ctx.fillStyle = state.mode === 'light'
+    ? 'rgba(255,255,255,0.45)'
+    : 'rgba(0,0,0,0.45)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = state.mode === 'light' ? '#000' : '#fff';
+  ctx.font = 'bold 40px Arial';
+  ctx.fillText('GAME OVER', W / 2, H / 2 - 20);
+  ctx.font = '20px Arial';
+  ctx.fillText('Press Space / click to restart', W / 2, H / 2 + 20);
+}
+
+function draw() {
+  drawBackground();
+  for (const ob of state.obstacles) drawObstacle(ob);
+  drawParticles();
+  drawPlayer();
+  drawUIOverlay();
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function handleAction() {
+  if (state.gameOver) resetGame();
+  else switchMode();
+}
+
+function togglePause() {
+  if (state.gameOver) return;
+  state.paused = !state.paused;
+  pauseBtn.textContent = state.paused ? 'Resume' : 'Pause';
+}
+
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space') {
+    e.preventDefault();
+    handleAction();
+  }
+  if (e.code === 'KeyP') {
+    togglePause();
+  }
+});
+
+canvas.addEventListener('mousedown', handleAction);
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  handleAction();
+}, { passive: false });
+
+restartBtn.addEventListener('click', resetGame);
+pauseBtn.addEventListener('click', togglePause);
+
+resetGame();
+loop();
+</script>
+</body>
+</html>
